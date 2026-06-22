@@ -1,0 +1,28 @@
+# --- AI Agent ---
+google-adk
+openai
+python-dotenv
+litellm
+
+# --- STT Model ---
+# PyTorch is installed separately with the CUDA index URL (see README).
+transformers>=4.45.0
+# datasets 4.x requires torchcodec (which needs FFmpeg DLLs on Windows). Pin to 3.x for soundfile backend.
+datasets>=3.0,<4.0
+peft>=0.13.0
+accelerate>=0.34.0
+bitsandbytes>=0.43.3
+evaluate>=0.4.2
+jiwer>=3.0.4
+librosa>=0.10.2
+soundfile>=0.12.1
+tensorboard>=2.17.0
+numpy>=2.0,<3.0
+# pyarrow 22+ Windows wheels segfault on import; pin to 21.x.
+pyarrow>=21.0.0,<22
+
+# --- Emotion Model (wav2vec2) ---
+# transformers / soundfile / numpy 는 위 STT 의존성과 공유.
+resampy>=0.4.2          # 16kHz 리샘플
+huggingface_hub>=0.23   # HF Hub 업로드/다운로드
+tqdm>=4.66              # 학습 진행 표시

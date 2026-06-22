@@ -1,0 +1,4 @@
+google-adk
+openai
+python-dotenv
+litellm

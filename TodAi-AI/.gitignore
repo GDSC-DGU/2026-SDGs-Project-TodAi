@@ -1,0 +1,40 @@
+/.venv
+/venv
+.venv
+.env
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+.vscode/
+.idea/
+
+# Outputs / artifacts
+outputs/
+runs/
+wandb/
+*.ckpt
+*.bin
+*.safetensors
+
+# Data
+data/
+/data
+*.zip
+*.irx263
+*.tar
+*.tar.gz
+
+# HF / Torch caches
+.cache/
+.huggingface/
+
+# Logs
+*.log
+.bat
+
+# 런타임 잡파일 / 크래시 덤프
+erl_crash.dump
+*.dump
+# 파이프라인 임시 오디오 (emotion 워커가 생성)
+*.wav.tmp

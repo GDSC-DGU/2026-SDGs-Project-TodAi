@@ -1,0 +1,34 @@
+CLAUDE.md
+./docs
+AGENTS.md
+
+# 로컬 실행 환경설정 (커밋 제외). .env.example 은 템플릿이므로 추적 유지
+.env
+.env.local
+
+# --- Go ---
+# 컴파일 산출물 / 바이너리
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/server
+/cmd/server/server
+# 테스트/커버리지 산출물
+*.test
+*.out
+coverage.txt
+# 의존성 vendoring (사용 안 함)
+/vendor/
+# go workspace
+go.work
+go.work.sum
+
+# --- 런타임 잡파일 ---
+erl_crash.dump
+*.dump
+
+# --- IDE ---
+.idea/
+.vscode/

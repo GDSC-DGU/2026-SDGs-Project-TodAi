@@ -1,0 +1,19 @@
+{
+  "name": "토닥 - 오늘의 이야기",
+  "short_name": "토닥",
+  "description": "매일 안부를 나누는 AI 말동무, 토닥이",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fbf7f0",
+  "theme_color": "#e8804f",
+  "lang": "ko",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

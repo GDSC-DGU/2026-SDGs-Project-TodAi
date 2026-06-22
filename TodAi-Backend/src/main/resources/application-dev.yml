@@ -1,0 +1,24 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/todai
+    username: ${POSTGRES_USER:todai}
+    password: ${POSTGRES_PASSWORD:todai}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    defer-datasource-initialization: true
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+  sql:
+    init:
+      mode: always
+      platform: postgresql
+
+  logging:
+    level:
+      org.hibernate.SQL: debug

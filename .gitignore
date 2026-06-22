@@ -1,0 +1,9 @@
+﻿.claude/
+.venv/
+__pycache__/
+*.pyc
+.env
+node_modules/
+dist/
+build/
+PROJECT_TEST.md

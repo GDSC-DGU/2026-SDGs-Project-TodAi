@@ -1,0 +1,30 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: todai-backend
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SERVER_PORT: ${SERVER_PORT:-8080}
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    container_name: todai-postgres
+    env_file:
+      - .env
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - todai-postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  todai-postgres-data:

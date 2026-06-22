@@ -1,0 +1,20 @@
+{
+  "name": "todai-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:admin": "npm run dev --workspace @todai/admin",
+    "dev:user": "npm run dev --workspace @todai/user",
+    "build:admin": "npm run build --workspace @todai/admin",
+    "build:user": "npm run build --workspace @todai/user",
+    "lint": "npm run lint --workspaces --if-present"
+  },
+  "optionalDependencies": {
+    "@tailwindcss/oxide-linux-x64-gnu": "^4.3.0",
+    "lightningcss-linux-x64-gnu": "^1.32.0"
+  }
+}
