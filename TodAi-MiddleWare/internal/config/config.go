@@ -12,6 +12,7 @@ const (
 	defaultRabbitMQEmotionQueue  = "todai.worker.emotion"
 	defaultRabbitMQSTTQueue      = "todai.worker.stt"
 	defaultRabbitMQReplyQueue    = "todai.reply"
+	defaultRabbitMQUserReplyQ    = "todai.user.reply"
 	defaultPublishTimeoutSeconds = 3
 	defaultBackendTimeoutSeconds = 3
 )
@@ -22,6 +23,7 @@ type Config struct {
 	RabbitMQEmotionQ       string
 	RabbitMQSTTQ           string
 	RabbitMQReplyQ         string
+	RabbitMQUserReplyQ     string
 	RabbitMQPublishTimeout time.Duration
 	BackendBaseURL         string
 	BackendRequestTimeout  time.Duration
@@ -34,6 +36,7 @@ func Load() *Config {
 		RabbitMQEmotionQ:       envOrDefault("RABBITMQ_EMOTION_QUEUE", defaultRabbitMQEmotionQueue),
 		RabbitMQSTTQ:           envOrDefault("RABBITMQ_STT_QUEUE", defaultRabbitMQSTTQueue),
 		RabbitMQReplyQ:         envOrDefault("RABBITMQ_REPLY_QUEUE", defaultRabbitMQReplyQueue),
+		RabbitMQUserReplyQ:     envOrDefault("RABBITMQ_USER_REPLY_QUEUE", defaultRabbitMQUserReplyQ),
 		RabbitMQPublishTimeout: publishTimeout(),
 		BackendBaseURL:         os.Getenv("BACKEND_BASE_URL"),
 		BackendRequestTimeout:  durationSeconds("BACKEND_REQUEST_TIMEOUT_SECONDS", defaultBackendTimeoutSeconds),

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 
 	"github.com/Hyuk-II/todai-middleware/internal/aggregator"
@@ -11,6 +12,7 @@ import (
 	"github.com/Hyuk-II/todai-middleware/internal/queue"
 	"github.com/Hyuk-II/todai-middleware/internal/slowtrack"
 	"github.com/Hyuk-II/todai-middleware/internal/websocket"
+	"github.com/Hyuk-II/todai-middleware/pkg/model"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
@@ -29,6 +31,7 @@ func main() {
 	}
 
 	topology := queue.NewTopology(cfg.RabbitMQEmotionQ, cfg.RabbitMQSTTQ, cfg.RabbitMQReplyQ)
+	topology.UserReplyQueue = cfg.RabbitMQUserReplyQ // fast track 대답 -> WS push
 	queueClient, err := queue.NewClient(cfg.RabbitMQURL, topology)
 
 	var utterancePublisher orchestrator.UtterancePublisher
@@ -98,6 +101,40 @@ func main() {
 
 	wsHandler := websocket.NewHandler(audioHandler)
 	r.GET("/ws", wsHandler.ServeHTTP)
+
+	// fast track: todai.user.reply 큐의 대답을 해당 WS 세션으로 push (RabbitMQ 가용 시)
+	if queueClient != nil {
+		userReplyConsumer, urErr := queue.NewUserReplyConsumer(queueClient, topology)
+		if urErr != nil {
+			log.Printf("user reply consumer unavailable: %v", urErr)
+		} else {
+			defer func() {
+				if err := userReplyConsumer.Close(); err != nil {
+					log.Printf("user reply consumer close failed: %v", err)
+				}
+			}()
+			urCtx, cancelUR := context.WithCancel(context.Background())
+			defer cancelUR()
+			go func() {
+				err := userReplyConsumer.Consume(urCtx, func(reply model.UserReply) error {
+					payload, mErr := json.Marshal(map[string]any{
+						"type":        "reply",
+						"text":        reply.Text,
+						"audio_b64":   reply.AudioB64,
+						"sample_rate": reply.SampleRate,
+					})
+					if mErr != nil {
+						return mErr
+					}
+					return wsHandler.SendToSession(reply.SessionID, payload)
+				})
+				if err != nil {
+					log.Printf("user reply consumer stopped: %v", err)
+				}
+			}()
+			log.Printf("user reply consumer started | queue=%s", cfg.RabbitMQUserReplyQ)
+		}
+	}
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})

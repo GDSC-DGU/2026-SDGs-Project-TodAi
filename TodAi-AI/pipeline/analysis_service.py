@@ -27,6 +27,7 @@ import time
 import pika
 import requests
 
+sys.path.insert(0, os.path.dirname(__file__))  # pipeline/ (reply_llm)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ai_agent"))
 from agent.agent import analyze_mental_health  # noqa: E402
@@ -36,13 +37,19 @@ BACKEND_BASE = os.getenv("BACKEND_BASE_URL", "http://localhost:8080").rstrip("/"
 EMOTION_Q = os.getenv("RABBITMQ_EMOTION_QUEUE", "todai.worker.emotion")
 STT_Q = os.getenv("RABBITMQ_STT_QUEUE", "todai.worker.stt")
 REPLY_Q = os.getenv("RABBITMQ_REPLY_QUEUE", "todai.reply")
+USER_REPLY_Q = os.getenv("RABBITMQ_USER_REPLY_QUEUE", "todai.user.reply")  # 대답 -> 사용자 WS
 USE_REAL_EMOTION = os.getenv("USE_REAL_EMOTION") == "1"
+USE_REAL_STT = os.getenv("USE_REAL_STT") == "1"
+USE_REPLY_LLM = os.getenv("USE_REPLY_LLM", "1") == "1"  # STT 후 말벗 대답 생성(로컬 Ollama)
+USE_TTS = os.getenv("USE_TTS", "1") == "1"              # 대답을 음성(TTS)으로도 전달
+_tts = None
 
 EMOTION_LABELS = ["기쁨", "놀라움", "두려움", "사랑스러움", "슬픔", "화남"]
 
 # correlation_id -> {job_id, session_id, elder_id, emotion, stt}
 _pending: dict[str, dict] = {}
 _emotion_recognizer = None
+_transcriber = None
 
 
 def _resolve_demo_elder_id() -> str:
@@ -90,9 +97,26 @@ def _emotion_from_audio(audio_b64: str) -> dict:
     return {"기쁨": 0.04, "놀라움": 0.06, "두려움": 0.20, "사랑스러움": 0.03, "슬픔": 0.54, "화남": 0.13}
 
 
-def _stt_text(_audio_b64: str) -> str:
-    """표준어 STT (mock). 실제로는 Whisper 사투리->표준어 워커가 채운다(GPU 필요)."""
-    return "요즘 무릎이 아파서 병원에 자주 가요. 자식들은 멀리 살아서 며칠째 말동무가 없네요."
+_STT_MOCK = "요즘 무릎이 아파서 병원에 자주 가요. 자식들은 멀리 살아서 며칠째 말동무가 없네요."
+
+
+def _stt_text(audio_b64: str) -> str:
+    """표준어 STT. USE_REAL_STT=1 이면 학습 Whisper(siyeonsung/whisper-korean-dialect, GPU),
+    아니면 고정 mock 텍스트."""
+    if USE_REAL_STT and audio_b64:
+        global _transcriber
+        try:
+            from stt_model.infer import DialectTranscriber
+            if _transcriber is None:
+                print("[stt] loading whisper-korean-dialect (first call, GPU)...")
+                _transcriber = DialectTranscriber()
+            pcm = base64.b64decode(audio_b64)
+            text = _transcriber.transcribe_pcm16(pcm)
+            print(f"[stt] real transcription: {text!r}")
+            return text or _STT_MOCK
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] real STT failed, using mock: {exc}")
+    return _STT_MOCK
 
 
 def _publish_reply(ch, req: dict, worker_type: str, result: dict):
@@ -134,7 +158,7 @@ def _try_record(corr_id: str):
     elder_id = _elder_for(session_id, st.get("elder_id", ""))
     emotion_6 = st["emotion"]
     text = st["stt"]
-    print(f"[ADK] correlation={corr_id} job_id={job_id} elder={elder_id} -> analyzing (6-cat emotion)")
+    print(f"[SLOW/ADK] correlation={corr_id} job_id={job_id} elder={elder_id} -> analyzing (6-cat emotion)")
 
     result = analyze_mental_health(
         session_id=session_id,
@@ -192,24 +216,70 @@ def _on_emotion(ch, method, _props, body):
     _try_record(corr)
 
 
+def _tts_b64(text: str):
+    """대답 텍스트 -> PCM16@16k base64 (로컬 한국어 TTS, GPU). 실패하면 None."""
+    if not USE_TTS or not text:
+        return None
+    global _tts
+    try:
+        import base64 as _b64
+        from tts import KoreanTTS
+        if _tts is None:
+            print("[tts] loading mms-tts-kor (first call, GPU)...")
+            _tts = KoreanTTS()
+        return _b64.b64encode(_tts.synth_to_pcm16(text)).decode()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] TTS failed: {exc}")
+        return None
+
+
+def _fast_reply(ch, req: dict, text: str):
+    """FAST TRACK — STT 도착 즉시 말벗 대답 생성(어르신 누적 지표 반영) + TTS 후 사용자 WS 로 전달.
+    slow track(감정+ADK 분석)을 기다리지 않는다."""
+    if not USE_REPLY_LLM:
+        return
+    session_id = req.get("session_id", "")
+    elder_id = _elder_for(session_id, req.get("elder_id", ""))
+    try:
+        from reply_llm import generate_reply
+        reply = generate_reply([], text, elder_id=elder_id)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] fast reply failed (Ollama 확인): {exc}")
+        return
+    print(f"[FAST/REPLY] 토닥이 → {reply!r}  (elder={elder_id}, STT 직후 · 누적지표 반영)")
+
+    audio_b64 = _tts_b64(reply)
+    # 사용자 WS 로 보낼 대답을 user-reply 큐로 publish (미들웨어가 session_id 로 라우팅)
+    payload = {"session_id": session_id, "text": reply,
+               "audio_b64": audio_b64 or "", "sample_rate": 16000}
+    ch.basic_publish(
+        exchange="", routing_key=USER_REPLY_Q,
+        body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        properties=pika.BasicProperties(content_type="application/json", delivery_mode=2),
+    )
+    print(f"  -> user reply published | session={session_id} tts={'O' if audio_b64 else 'X'}")
+    return reply
+
+
 def _on_stt(ch, method, _props, body):
     req = json.loads(body)
     corr = req.get("correlation_id", "")
     print(f"[stt] received | correlation={corr} job_id={req.get('job_id')}")
     text = _stt_text(req.get("audio_data") or "")
+    _fast_reply(ch, req, text)                   # ★ FAST TRACK: 즉시 대답(지표반영) + TTS -> WS
     _publish_reply(ch, req, "stt", {"text": text})
     st = _pending.setdefault(corr, {})
     st.update({"job_id": req.get("job_id", ""), "session_id": req.get("session_id", ""),
                "elder_id": req.get("elder_id", ""), "stt": text})
     ch.basic_ack(delivery_tag=method.delivery_tag)
-    _try_record(corr)
+    _try_record(corr)                            # SLOW TRACK: 분석은 emotion+stt 모이면
 
 
 def main():
     params = pika.URLParameters(RABBITMQ_URL)
     conn = pika.BlockingConnection(params)
     ch = conn.channel()
-    for q in (EMOTION_Q, STT_Q, REPLY_Q):
+    for q in (EMOTION_Q, STT_Q, REPLY_Q, USER_REPLY_Q):
         ch.queue_declare(queue=q, durable=True)
     ch.basic_qos(prefetch_count=8)
     ch.basic_consume(queue=EMOTION_Q, on_message_callback=_on_emotion)

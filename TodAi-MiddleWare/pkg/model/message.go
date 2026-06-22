@@ -57,3 +57,12 @@ type EmotionResult struct {
 type STTResult struct {
 	Text string `json:"text"`
 }
+
+// UserReply is the assistant (말벗) reply pushed back to the user's WebSocket (fast track).
+// 분석 서비스가 todai.user.reply 큐로 publish 하면, 미들웨어가 session_id 로 WS 세션을 찾아 전달한다.
+type UserReply struct {
+	SessionID  string `json:"session_id"`
+	Text       string `json:"text"`
+	AudioB64   string `json:"audio_b64,omitempty"`    // PCM16 LE mono base64 (TTS 음성)
+	SampleRate int    `json:"sample_rate,omitempty"`  // 오디오 샘플레이트(보통 16000)
+}

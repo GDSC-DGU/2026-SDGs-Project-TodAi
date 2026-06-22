@@ -19,10 +19,33 @@ const TODAK_REPLIES = [
   "오늘도 이렇게 이야기 나눠 주셔서 기뻐요. 식사는 잘 챙기셨어요?",
 ];
 
-// TODO: 실제 백엔드 채팅 엔드포인트로 교체 (예: POST /proxy/api/chat)
-async function sendToTodak(_history: Message[], turn: number): Promise<string> {
-  await new Promise((r) => setTimeout(r, 900));
-  return TODAK_REPLIES[turn % TODAK_REPLIES.length];
+// 로컬 LLM(Ollama) 기반 말벗 대답 서비스. 서비스가 없으면 mock 문장으로 폴백한다.
+const CHAT_URL = process.env.NEXT_PUBLIC_CHAT_URL || "http://localhost:8100/api/chat";
+// 데모: 이 앱이 어느 어르신인지(누적 지표 피드백용). 실제로는 로그인/세션에서 결정.
+const ELDER_ID = process.env.NEXT_PUBLIC_ELDER_ID || "5";
+
+async function sendToTodak(
+  history: Message[],
+  userText: string,
+  turn: number,
+): Promise<string> {
+  try {
+    const res = await fetch(CHAT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: userText,
+        history: history.map((m) => ({ role: m.role, text: m.text })),
+        elder_id: ELDER_ID,
+      }),
+    });
+    if (!res.ok) throw new Error(`chat ${res.status}`);
+    const data = await res.json();
+    if (typeof data.reply === "string" && data.reply.trim()) return data.reply;
+    throw new Error("empty reply");
+  } catch {
+    return TODAK_REPLIES[turn % TODAK_REPLIES.length];
+  }
 }
 
 const GREETING: Message = {
@@ -65,7 +88,7 @@ export default function ChatPage() {
     setThinking(true);
 
     try {
-      const reply = await sendToTodak(history, turn);
+      const reply = await sendToTodak(messages, text, turn);
       setMessages((prev) => [...prev, { id: Date.now() + 1, role: "todak", text: reply }]);
       setTurn((t) => t + 1);
     } finally {

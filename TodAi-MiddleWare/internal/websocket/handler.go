@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -100,4 +101,15 @@ func (h *Handler) activeCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.sessions)
+}
+
+// SendToSession pushes a text payload to a specific session's WebSocket (fast track 대답).
+func (h *Handler) SendToSession(sessionID string, data []byte) error {
+	h.mu.RLock()
+	sess, ok := h.sessions[sessionID]
+	h.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+	return sess.Send(gws.TextMessage, data)
 }
