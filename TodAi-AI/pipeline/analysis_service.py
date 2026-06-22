@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(__file__))  # pipeline/ (reply_llm)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ai_agent"))
 from agent.agent import analyze_mental_health  # noqa: E402
+from adk_remote import analyze_remote  # noqa: E402  (배포된 Cloud Run 멀티에이전트)
 
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
 BACKEND_BASE = os.getenv("BACKEND_BASE_URL", "http://localhost:8080").rstrip("/")
@@ -42,6 +43,9 @@ USE_REAL_EMOTION = os.getenv("USE_REAL_EMOTION") == "1"
 USE_REAL_STT = os.getenv("USE_REAL_STT") == "1"
 USE_REPLY_LLM = os.getenv("USE_REPLY_LLM", "1") == "1"  # STT 후 말벗 대답 생성(로컬 Ollama)
 USE_TTS = os.getenv("USE_TTS", "1") == "1"              # 대답을 음성(TTS)으로도 전달
+USE_REMOTE_ADK = os.getenv("USE_REMOTE_ADK", "1") == "1"   # 배포된 Cloud Run 멀티에이전트로 5지표 분석
+ADK_LOCAL_FALLBACK = os.getenv("ADK_LOCAL_FALLBACK", "1") == "1"  # 원격 실패 시 로컬 분석으로 폴백
+ANALYZER_MODE = os.getenv("ANALYZER_MODE", "multi")    # 로컬 폴백 시 분석 모드(single|multi)
 _tts = None
 
 EMOTION_LABELS = ["기쁨", "놀라움", "두려움", "사랑스러움", "슬픔", "화남"]
@@ -149,6 +153,30 @@ def _elder_for(session_id: str, req_elder: str) -> str:
     return DEMO_ELDER_ID
 
 
+def _analyze(session_id: str, text: str, emotion_6: dict, history: list) -> dict:
+    """5지표 분석. USE_REMOTE_ADK 면 배포된 Cloud Run 멀티에이전트 호출,
+    실패하면(ADK_LOCAL_FALLBACK) 로컬 analyze_mental_health 로 폴백한다."""
+    emotion_json = json.dumps(emotion_6, ensure_ascii=False)
+    history_json = json.dumps(history, ensure_ascii=False)
+    if USE_REMOTE_ADK:
+        try:
+            res = analyze_remote(session_id, text, emotion_json, history_json)
+            print(f"[ADK/REMOTE] ok | mode={res.get('mode')}")
+            return res
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ADK/REMOTE][ERROR] {exc}")
+            if not ADK_LOCAL_FALLBACK:
+                raise
+            print("[ADK] -> 로컬 분석으로 폴백")
+    return analyze_mental_health(
+        session_id=session_id,
+        text=text,
+        emotion=emotion_json,
+        conversation_history=history_json,
+        mode=ANALYZER_MODE,
+    )
+
+
 def _try_record(corr_id: str):
     st = _pending.get(corr_id)
     if not st or "emotion" not in st or "stt" not in st:
@@ -158,18 +186,14 @@ def _try_record(corr_id: str):
     elder_id = _elder_for(session_id, st.get("elder_id", ""))
     emotion_6 = st["emotion"]
     text = st["stt"]
-    print(f"[SLOW/ADK] correlation={corr_id} job_id={job_id} elder={elder_id} -> analyzing (6-cat emotion)")
+    src = "REMOTE-ADK" if USE_REMOTE_ADK else "LOCAL"
+    print(f"[SLOW/ADK:{src}] correlation={corr_id} job_id={job_id} elder={elder_id} -> analyzing (6-cat emotion)")
 
-    result = analyze_mental_health(
-        session_id=session_id,
-        text=text,
-        emotion=json.dumps(emotion_6, ensure_ascii=False),
-        conversation_history=json.dumps(
-            [{"role": "assistant", "text": "오늘 어떻게 지내셨어요?", "timestamp": int(time.time()) - 60},
-             {"role": "user", "text": text, "timestamp": int(time.time()) - 30}],
-            ensure_ascii=False,
-        ),
-    )
+    history = [
+        {"role": "assistant", "text": "오늘 어떻게 지내셨어요?", "timestamp": int(time.time()) - 60},
+        {"role": "user", "text": text, "timestamp": int(time.time()) - 30},
+    ]
+    result = _analyze(session_id, text, emotion_6, history)
     scores = result["scores"]
     # 에이전트 키 emotional_fluctuation -> 백엔드 metric 키 emotion_variance
     metrics = {
@@ -284,9 +308,10 @@ def main():
     ch.basic_qos(prefetch_count=8)
     ch.basic_consume(queue=EMOTION_Q, on_message_callback=_on_emotion)
     ch.basic_consume(queue=STT_Q, on_message_callback=_on_stt)
+    adk_src = "remote(Cloud Run)" if USE_REMOTE_ADK else "local"
     print(f"analysis_service up | backend={BACKEND_BASE} demo_elder={DEMO_ELDER_ID} "
-          f"real_emotion={USE_REAL_EMOTION}")
-    print(f"consuming: {EMOTION_Q}, {STT_Q} | replying to: {REPLY_Q}")
+          f"real_emotion={USE_REAL_EMOTION} real_stt={USE_REAL_STT}")
+    print(f"adk={adk_src} (fallback={ADK_LOCAL_FALLBACK}) | consuming: {EMOTION_Q}, {STT_Q} | replying to: {REPLY_Q}")
     try:
         ch.start_consuming()
     except KeyboardInterrupt:
