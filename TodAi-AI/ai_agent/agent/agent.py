@@ -5,15 +5,24 @@ from dotenv import load_dotenv
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 
-load_dotenv()
+# cwd 와 무관하게 ai_agent/.env 를 확실히 로드 (자격증명 누락 방지)
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 ROUTING_MODEL = os.getenv("ROUTING_MODEL", "gemini-2.5-flash")
 ANALYSIS_MODEL = os.getenv("ANALYSIS_MODEL", "gemini-3.5-flash")
 
-_client = OpenAI(
-    api_key=os.getenv("API_KEY"),
-    base_url=os.getenv("BASE_URL"),
-)
+# mindlogic 게이트웨이 크레딧 소진(402) 대응: GOOGLE_API_KEY 가 있으면 Gemini 를 직접 호출한다.
+if os.getenv("USE_GEMINI_DIRECT", "1") == "1" and os.getenv("GOOGLE_API_KEY"):
+    _client = OpenAI(
+        api_key=os.getenv("GOOGLE_API_KEY"),
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    )
+    ANALYSIS_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")  # 실제 존재하는 모델로 강제
+else:
+    _client = OpenAI(
+        api_key=os.getenv("API_KEY"),
+        base_url=os.getenv("BASE_URL"),
+    )
 
 SCORE_CRITERIA = """
 [채점 기준표]

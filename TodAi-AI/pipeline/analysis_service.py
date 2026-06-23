@@ -21,6 +21,7 @@ import base64
 import json
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -294,6 +295,13 @@ def _fast_reply(ch, req: dict, text: str):
         return
     print(f"[FAST/REPLY] 토닥이 ({llm_sec:.1f}s) → {reply!r}  (elder={elder_id}, {len(reply)}자)")
 
+    # 대화 기록(conversation_message) 저장 — 관리자 일간 화면의 '대화 기록' 채움
+    try:
+        from elder_context import save_messages
+        save_messages(session_id, text, reply)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] save_messages failed: {exc}")
+
     _t = time.time()
     audio_b64 = _tts_b64(reply)
     print(f"[FAST/TTS] {time.time()-_t:.1f}s (tts={'O' if audio_b64 else 'X'})")
@@ -323,7 +331,33 @@ def _on_stt(ch, method, _props, body):
     _try_record(corr)                            # SLOW TRACK: 분석은 emotion+stt 모이면
 
 
+_singleton_sock = None
+
+
+def _ensure_single_instance():
+    """중복 실행 방지 — 분석서비스가 2개 뜨면 한 발화의 emotion/stt 가 인스턴스끼리 갈려
+    슬로우 트랙(둘 다 필요)이 안 돌고 기록이 누락된다. 고정 포트를 잡아 단일 인스턴스를 강제."""
+    global _singleton_sock
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Windows 는 기본적으로 같은 포트 중복 바인드를 허용(동시 시작 시 경합으로 둘 다 뜸).
+    # SO_EXCLUSIVEADDRUSE 로 배타적 바인드를 강제해 확실히 단일 인스턴스만 허용한다.
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        except OSError:
+            pass
+    try:
+        sock.bind(("127.0.0.1", 8123))
+        sock.listen(1)
+    except OSError:
+        print("[FATAL] analysis_service 가 이미 실행 중입니다(포트 8123). 중복 실행 방지 — 종료합니다. "
+              "기존 인스턴스를 쓰거나, 먼저 그것을 종료한 뒤 다시 실행하세요.")
+        sys.exit(1)
+    _singleton_sock = sock  # GC 방지로 살려둠
+
+
 def main():
+    _ensure_single_instance()
     params = pika.URLParameters(RABBITMQ_URL)
     # STT+LLM+TTS 가 콜백을 10~20초 블로킹하면 RabbitMQ 하트비트가 끊겨 연결이 닫히고
     # 다음 publish 에서 StreamLostError 로 죽는다. 하트비트를 끄고 블로킹 타임아웃을 늘린다.

@@ -66,6 +66,51 @@ def fetch_elder_context(elder_id) -> dict | None:
         conn.close()
 
 
+def save_messages(session_key, user_text: str, reply_text: str) -> None:
+    """대화 메시지(어르신 발화 + 토닥이 대답)를 conversation_message 에 저장.
+    관리자 일간 화면의 '대화 기록'을 채운다. 세션은 백엔드가 session_key 로 미리 만들어 둠.
+    실패해도 조용히 넘어간다(파이프라인을 막지 않음)."""
+    if not session_key or not (user_text or reply_text):
+        return
+    try:
+        conn = psycopg2.connect(**PG, connect_timeout=3)
+    except Exception:
+        return
+    try:
+        with conn:  # 성공 시 커밋
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM conversation_session WHERE session_key = %s", (session_key,))
+                row = cur.fetchone()
+                if not row:
+                    return
+                sid = row[0]
+                cur.execute(
+                    "SELECT COALESCE(MAX(message_order), 0) FROM conversation_message WHERE conversation_session_id = %s",
+                    (sid,),
+                )
+                order = cur.fetchone()[0] or 0
+                turns = []
+                if user_text:
+                    order += 1
+                    turns.append((sid, user_text, "ELDER", order))
+                if reply_text:
+                    order += 1
+                    turns.append((sid, reply_text, "AI", order))
+                for sid_, content, speaker, msg_order in turns:
+                    cur.execute(
+                        "INSERT INTO conversation_message "
+                        "(conversation_session_id, content, speaker_type, message_order, created_at, spoken_at) "
+                        "VALUES (%s, %s, %s, %s, now(), now())",
+                        (sid_, content, speaker, msg_order),
+                    )
+                cur.execute(
+                    "UPDATE conversation_session SET turn_count = COALESCE(turn_count, 0) + %s WHERE id = %s",
+                    (len(turns), sid),
+                )
+    finally:
+        conn.close()
+
+
 def context_prompt(elder_id) -> str:
     """LLM 시스템 프롬프트에 덧붙일 '어르신 최근 상태' 블록. 데이터 없으면 빈 문자열."""
     ctx = fetch_elder_context(elder_id)

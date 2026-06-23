@@ -87,6 +87,94 @@
 
 ---
 
+## 7. 음성 대답 겹침/누적 (음향 피드백 루프)
+
+- **증상**: 질문엔 잘 답하는데, **이전/다른 대답이 겹쳐 들리고 시간이 갈수록 점점 많아짐**
+- **원인**:
+  1. 3-2에서 마이크 무음을 고치려고 `getUserMedia`의 **에코 제거(echoCancellation)를 끔** → 스피커로 나온
+     토닥이 대답을 **마이크가 되받아 재STT → 또 대답 → 또 스피커...** 음향 피드백 루프로 누적
+  2. 재생 코드가 새 대답마다 즉시 `start()`만 해서 **이전 재생과 겹침**
+- **해결** (`voice/page.tsx`):
+  - **반이중(half-duplex)**: 대답 재생 중엔 `speakingRef`로 **마이크 전송 차단** → 피드백 루프 차단
+  - **겹침 방지**: 새 대답 오면 `curSrcRef.stop()`으로 **이전 재생 중지**
+  - **잔향 보호**: 재생 종료 후 **350ms** 뒤 마이크 재개
+  - 재생 중 상태 "토닥이가 말하고 있어요…" 표시
+- **물리적 권장**: 이어폰/헤드셋 착용 시 스피커→마이크 경로 자체가 사라져 가장 확실
+
+---
+
+## 8. 음성 기록이 관리자 화면에 반영 안 됨
+
+- **증상**: 음성 대화가 elder(=박하준, id 5)에 **DB로는 기록되는데** 관리자 일간 화면엔 안 보임
+- **진단**: 관리자 일간/주간/월간 조회는 `conversation_session.started_at`의 **날짜 범위**로 세션을 찾는데
+  (`findFirstByElderIdAndStartedAtGreaterThanEqual...`), 음성 파이프라인이 만든 세션은
+  `ConversationSession.createInternalSession`이 **`started_at = null`, `status = CREATED`** 로 생성 →
+  날짜 조회에서 영영 제외됨
+- **해결**:
+  1. **백엔드**: `createInternalSession`이 `started_at = now()`, `ended_at = now()`, `status = COMPLETED` 를
+     채우도록 수정 (음성 파이프라인은 세션 시각을 따로 안 보내므로 생성 시각 사용) — **재시작 필요**
+  2. **기존 데이터 백필**: `UPDATE conversation_session SET started_at=created_at, ended_at=created_at,
+     session_status='COMPLETED' WHERE started_at IS NULL`
+- **부수 정합성**: user 앱의 하드코딩 사용자명 "박하준"과 맞추려 `elder` id=5 의 이름을 **안건호 → 박하준**으로 개명
+  (PowerShell→psql 인라인은 한글 인코딩 깨짐 → **UTF-8 `.sql` 파일 + `psql -f`** 로 처리)
+
+---
+
+## 9. 관리자 "대화 기록" 0개 메시지
+
+- **증상**: 박하준 일간 화면에서 감정지수·요약은 나오는데 **"대화 기록 0개의 메시지"**
+- **원인**: 화면의 대화 기록은 `conversation_message` 테이블을 읽는데, **음성 파이프라인이
+  `analysis_result`(지표)만 저장하고 발화/대답 텍스트를 `conversation_message`에 안 넣었음**.
+  (시드 어르신들은 mock 메시지가 있어 보였던 것 / 백엔드엔 메시지 쓰기 API도 없음)
+- **해결**: `elder_context.save_messages(session_key, user_text, reply_text)` 추가 — 분석서비스가
+  이미 가진 **psycopg2로 `conversation_message`에 직접 저장**(ELDER 발화 + AI 대답, message_order 증가,
+  turn_count 갱신). `_fast_reply`에서 매 발화마다 호출. 백엔드 재빌드 불필요.
+- **검증**: 더미 발화로 ELDER/AI 2건 정상 저장 확인. **수정 이전 세션은 0개 유지**(AI 대답이 어디에도
+  저장 안 돼 백필 불가) → 새로 녹음하면 그 세션부터 대화 기록이 채워짐.
+
+---
+
+## 10. 중복 분석서비스 → 슬로우 트랙 누락 (대화는 저장되는데 분석/연결 누락)
+
+- **증상**: 새 대화를 했는데 관리자에 안 보임. DB를 보니 메시지(`conversation_message`)는 저장됐는데
+  해당 세션의 `analysis_result`가 **0건**이고 `conversation_session.elder_id`가 **NULL**
+- **원인**: **분석서비스가 또 2개 실행**됨 → 한 발화의 `emotion`은 A 인스턴스, `stt`는 B 인스턴스로
+  RabbitMQ 라운드로빈 분배됨 → 슬로우 트랙(`_try_record`)은 **한 프로세스 안에 emotion+stt가 모두**
+  있어야 도는데 갈려서 **안 돔** → `/result` 미저장 → 어르신 미연결 + 분석 결과 없음.
+  (fast 트랙의 `save_messages`는 stt 받은 인스턴스에서 돌아 메시지만 저장됨)
+- **해결**:
+  1. **중복 실행 차단 가드** — `analysis_service` 기동 시 `127.0.0.1:8123` 을 잡고, 이미 잡혀 있으면
+     `[FATAL]` 출력 후 종료(`_ensure_single_instance`). 2번째 인스턴스가 아예 못 뜸.
+  2. 깨진 세션 복구: 이미 메시지가 있는 세션은 `UPDATE conversation_session SET elder_id=5`로 연결
+     (단 분석 결과는 슬로우 트랙이 안 돌아 비어 있음 → 완전한 결과는 단일 인스턴스로 재녹음)
+- **교훈**: in-memory 집계(`_pending`)에 의존하는 단일 컨슈머 설계는 **중복 실행에 치명적** → 포트 가드로 강제.
+
+---
+
+## 11. 대화 기록 화자가 전부 "말벗 AI"로 표시
+
+- **증상**: 대화 기록이 보이긴 하는데 **어르신 발화까지 전부 "말벗 AI"** 라벨로 나옴
+- **원인**: 관리자 프론트가 화자를 고정 문자열로 판별 — `c.name === "어르신" ? "어르신" : "말동무"`.
+  그런데 백엔드 `resolveSpeakerName`은 어르신 메시지에 **실제 이름("박하준")**, AI엔 "말벗 AI"를 돌려줌 →
+  "어르신"과 안 맞아 전부 "말동무"(=말벗 AI)로 처리됨. (시드 데이터에도 있던 잠재 버그)
+- **해결** (`admin .../members/[id]/page.tsx`): 판별을 뒤집어 **"말벗 AI"만 말동무, 나머지는 어르신**으로:
+  `speaker: c.name === "말벗 AI" ? "말동무" : "어르신"`
+
+---
+
+## 12. 5지표 분석 402 (크레딧 소진) → Gemini 우회 + 배포본 재배포
+
+- **증상**: `[RECORD][ERROR] 402 insufficient_quota - exceeded your credit quota for this month`. 배포 ADK·로컬 폴백 둘 다 mindlogic 게이트웨이를 써서 막힘. (오늘 테스트로 mindlogic 월 크레딧 소진)
+- **원인**: `agent.py`의 분석 LLM 클라이언트가 mindlogic 게이트웨이(`API_KEY`+`BASE_URL`) 사용. 배포된 Cloud Run 에이전트도 내부적으로 동일 → 402.
+- **해결 (2단계)**:
+  1. **로컬 우회**: `agent.py`가 `USE_GEMINI_DIRECT=1`+`GOOGLE_API_KEY`면 **Gemini 직접 호출**(`https://generativelanguage.googleapis.com/v1beta/openai/`, 모델 `gemini-2.5-flash`). `.env` `USE_REMOTE_ADK=0`로 로컬 분석. → 402 해소.
+  2. **배포본 재배포**: 같은 Gemini 설정으로 Cloud Run 재배포 →
+     `adk deploy cloud_run --project=gdgsc-499914 --region=asia-northeast3 --service_name=adk-default-service-name --app_name=agent agent -- --no-allow-unauthenticated --quiet --set-env-vars=USE_GEMINI_DIRECT=1,GOOGLE_API_KEY=…,GEMINI_MODEL=gemini-2.5-flash,ROUTING_MODEL=gemini-2.5-flash,GOOGLE_GENAI_USE_VERTEXAI=False`
+     (사전: agent 폴더에 `requirements.txt` 복사 필요). 재배포 후 `.env` `USE_REMOTE_ADK=1` + 프록시. 리비전 `…-00008-lxk`.
+- **교훈**: 점수가 비정상적으로 낮은 건(5~15) 대부분 **빈 발화("마이크테스트")** 입력 탓. 실제 문장이면 정상(55~95). mindlogic은 셀프충전 UI 없음 → sales@mindlogic.ai.
+
+---
+
 ## 코드 변경 요약
 
 **TodAi-AI**

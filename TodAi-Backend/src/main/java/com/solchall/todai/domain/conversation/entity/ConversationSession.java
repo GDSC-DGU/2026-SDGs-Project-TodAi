@@ -61,14 +61,17 @@ public class ConversationSession {
     }
 
     public static ConversationSession createInternalSession(Elder elder, String sessionKey) {
+        // started_at 을 채워야 관리자 일간/주간/월간 조회(started_at 날짜 범위 기준)에 잡힌다.
+        // 음성 파이프라인은 세션 시작/종료 시각을 따로 보내지 않으므로 생성 시각으로 채운다.
+        LocalDateTime now = LocalDateTime.now();
         return new ConversationSession(
                 elder,
                 sessionKey,
+                now,
+                now,
                 null,
                 null,
-                null,
-                null,
-                SessionStatus.CREATED,
+                SessionStatus.COMPLETED,
                 null
         );
     }

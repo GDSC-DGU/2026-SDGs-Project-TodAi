@@ -308,7 +308,9 @@ function mapDailyApi(api: DailyApiData, date: string): DailyApiResult {
   const chatLog: ChatMessage[] = (api.conv_logs ?? [])
     .filter((c) => c?.content)
     .map((c) => ({
-      speaker: c.name === "어르신" ? "어르신" : "말동무",
+      // 백엔드는 AI 메시지에 "말벗 AI", 어르신 메시지엔 실제 이름(예: 박하준)을 준다.
+      // 따라서 "말벗 AI" 만 말동무로, 나머지는 어르신으로 판별한다.
+      speaker: c.name === "말벗 AI" ? "말동무" : "어르신",
       text: c.content,
     }));
 
