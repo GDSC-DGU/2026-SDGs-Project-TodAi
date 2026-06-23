@@ -115,8 +115,10 @@ def _stt_text(audio_b64: str) -> str:
                 print("[stt] loading whisper-korean-dialect (first call, GPU)...")
                 _transcriber = DialectTranscriber()
             pcm = base64.b64decode(audio_b64)
+            _t = time.time()
             text = _transcriber.transcribe_pcm16(pcm)
-            print(f"[stt] real transcription: {text!r}")
+            audio_sec = len(pcm) / 2 / 16000
+            print(f"[stt] real transcription ({time.time()-_t:.1f}s, 오디오 {audio_sec:.1f}s): {text!r}")
             return text or _STT_MOCK
         except Exception as exc:  # noqa: BLE001
             print(f"[warn] real STT failed, using mock: {exc}")
@@ -266,13 +268,17 @@ def _fast_reply(ch, req: dict, text: str):
     elder_id = _elder_for(session_id, req.get("elder_id", ""))
     try:
         from reply_llm import generate_reply
+        _t = time.time()
         reply = generate_reply([], text, elder_id=elder_id)
+        llm_sec = time.time() - _t
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] fast reply failed (Ollama 확인): {exc}")
         return
-    print(f"[FAST/REPLY] 토닥이 → {reply!r}  (elder={elder_id}, STT 직후 · 누적지표 반영)")
+    print(f"[FAST/REPLY] 토닥이 ({llm_sec:.1f}s) → {reply!r}  (elder={elder_id}, {len(reply)}자)")
 
+    _t = time.time()
     audio_b64 = _tts_b64(reply)
+    print(f"[FAST/TTS] {time.time()-_t:.1f}s (tts={'O' if audio_b64 else 'X'})")
     # 사용자 WS 로 보낼 대답을 user-reply 큐로 publish (미들웨어가 session_id 로 라우팅)
     payload = {"session_id": session_id, "text": reply,
                "audio_b64": audio_b64 or "", "sample_rate": 16000}
@@ -301,6 +307,10 @@ def _on_stt(ch, method, _props, body):
 
 def main():
     params = pika.URLParameters(RABBITMQ_URL)
+    # STT+LLM+TTS 가 콜백을 10~20초 블로킹하면 RabbitMQ 하트비트가 끊겨 연결이 닫히고
+    # 다음 publish 에서 StreamLostError 로 죽는다. 하트비트를 끄고 블로킹 타임아웃을 늘린다.
+    params.heartbeat = 0
+    params.blocked_connection_timeout = 300
     conn = pika.BlockingConnection(params)
     ch = conn.channel()
     for q in (EMOTION_Q, STT_Q, REPLY_Q, USER_REPLY_Q):

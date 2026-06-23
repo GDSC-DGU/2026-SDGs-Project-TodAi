@@ -28,11 +28,14 @@ export default function VoicePage() {
   const [talking, setTalking] = useState(false);
   const [status, setStatus] = useState("연결 중…");
   const [caption, setCaption] = useState("");
+  const [micLevel, setMicLevel] = useState(0); // 브라우저 캡처 음량(0~1) — 마이크 진단용
 
   const wsRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const procRef = useRef<ScriptProcessorNode | null>(null);
+  const srcRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const sinkRef = useRef<GainNode | null>(null);
   const playCtxRef = useRef<AudioContext | null>(null);
 
   // 대답 오디오(PCM16 base64) 재생
@@ -92,7 +95,19 @@ export default function VoicePage() {
     async function startMic() {
       if (talking && !muted && !streamRef.current) {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          // 무선 헤드셋(Razer 등)에서 기본 DSP(에코제거/잡음억제/자동게인)가
+          // 앱에 무음을 주는 사례가 있어 끈다. 안되면 deviceId 명시도 고려.
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            },
+          });
+          console.log(
+            "[voice] mic track:",
+            stream.getAudioTracks().map((t) => `${t.label} (enabled=${t.enabled}, muted=${t.muted})`),
+          );
           if (cancelled) {
             stream.getTracks().forEach((t) => t.stop());
             return;
@@ -101,16 +116,27 @@ export default function VoicePage() {
           const ctx = new AudioContext();
           ctxRef.current = ctx;
           const src = ctx.createMediaStreamSource(stream);
+          srcRef.current = src; // ⚠️ ref 로 보관: 지역변수면 GC 되어 입력이 무음(0)이 됨
           const proc = ctx.createScriptProcessor(4096, 1, 1);
           procRef.current = proc;
           proc.onaudioprocess = (e) => {
+            const input = e.inputBuffer.getChannelData(0);
+            // 브라우저가 실제로 듣는 음량(rms) — 화면 진단용
+            let sum = 0;
+            for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+            setMicLevel(Math.sqrt(sum / input.length));
             const ws = wsRef.current;
             if (!ws || ws.readyState !== WebSocket.OPEN) return;
-            const pcm = toPcm16(e.inputBuffer.getChannelData(0), ctx.sampleRate);
-            ws.send(pcm);
+            ws.send(toPcm16(input, ctx.sampleRate));
           };
           src.connect(proc);
-          proc.connect(ctx.destination);
+          // ScriptProcessor 는 destination 에 연결돼야 동작. 단 마이크가 스피커로
+          // 새어 하울링 나지 않도록 gain 0 을 거쳐 연결한다.
+          const sink = ctx.createGain();
+          sink.gain.value = 0;
+          sinkRef.current = sink;
+          proc.connect(sink);
+          sink.connect(ctx.destination);
           setStatus("듣고 있어요…");
         } catch {
           setStatus("마이크 권한 필요");
@@ -121,6 +147,10 @@ export default function VoicePage() {
     function stopMic() {
       procRef.current?.disconnect();
       procRef.current = null;
+      srcRef.current?.disconnect();
+      srcRef.current = null;
+      sinkRef.current?.disconnect();
+      sinkRef.current = null;
       ctxRef.current?.close();
       ctxRef.current = null;
       streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -195,6 +225,24 @@ export default function VoicePage() {
         <p className="text-[0.95rem] font-semibold text-[var(--primary-dark)] mt-2">
           통화 시간 {mmss}
         </p>
+
+        {/* 마이크 입력 레벨(진단): 말할 때 막대가 차오르고 숫자가 0보다 커야 정상 */}
+        {talking && (
+          <div className="mt-3 w-[260px] max-w-[80%]">
+            <div className="h-2.5 rounded-full bg-[var(--surface-sunken)] overflow-hidden">
+              <div
+                className="h-full rounded-full transition-[width] duration-75"
+                style={{
+                  width: `${Math.min(100, Math.round(micLevel * 400))}%`,
+                  background: micLevel > 0.005 ? "var(--success)" : "var(--border)",
+                }}
+              />
+            </div>
+            <p className="text-[0.78rem] text-[var(--muted)] mt-1 text-center">
+              마이크 입력 {Math.round(micLevel * 1000)} {micLevel > 0.005 ? "🎤" : "· 무음"}
+            </p>
+          </div>
+        )}
 
         {/* 토닥이 대답 자막 */}
         {caption && (

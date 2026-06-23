@@ -38,6 +38,7 @@ hf upload siyeonsung/whisper-korean-dialect .
 sgds/
 ├── stt_model/                      # Whisper 사투리 파인튜닝 파이프라인
 │   ├── whisper_dialect_finetune.py # 메인 학습 스크립트 (LoRA + 8bit)
+│   ├── infer.py                    # DialectTranscriber — 파이프라인이 import하는 실시간 STT 추론 진입점
 │   ├── prepare_data.py             # 원천 데이터 → utterance 단위 청크 + JSONL 매니페스트 생성
 │   ├── extract_zips.py             # AI Hub 139-1 zip 파일 일괄 추출
 │   ├── make_full_manifest.py       # 기존 청크로 매니페스트 재구성
@@ -56,6 +57,14 @@ sgds/
 │   │   ├── agent.py                # Google ADK + LiteLLM (gemini-2.5-flash) 기반 분석 엔진
 │   │   └── __init__.py
 │   └── test_agent.py               # 에이전트 통합 테스트
+├── pipeline/                       # ★ 실시간 음성 케어 파이프라인 (미들웨어 뒤단 Python 워커)
+│   ├── analysis_service.py         # 오케스트레이터: emotion·STT 워커 + fast 대답 + slow ADK 기록
+│   ├── reply_llm.py                # 말벗 '토닥이' 대답 생성 (로컬 Ollama, 누적지표 주입)
+│   ├── reply_service.py            # 프론트 채팅용 FastAPI (:8100, POST /api/chat)
+│   ├── elder_context.py            # 어르신 누적 지표 조회 → 대답 컨텍스트 (피드백 루프)
+│   ├── tts.py                      # 로컬 한국어 TTS (facebook/mms-tts-kor, GPU)
+│   ├── adk_remote.py               # 배포된 ADK 멀티에이전트(Cloud Run) 호출 클라이언트
+│   └── ws_audio_client.py          # WS 발화 송신 + 대답 수신 E2E 테스트 클라이언트
 ├── data/
 │   ├── Training/                   # AI Hub 139-1 원천 zip (학습)
 │   ├── Validation/                 # AI Hub 139-1 원천 zip (검증)
@@ -371,6 +380,90 @@ result = analyze_mental_health(
 
 ```powershell
 python ai_agent/test_agent.py
+```
+
+---
+
+## 실시간 음성 케어 파이프라인 (`pipeline/`)
+
+학습한 STT·감정 모델과 배포된 ADK 에이전트를 묶어, **음성 발화 1건이 들어오면 즉시 말벗 대답을
+음성으로 돌려주는 동시에(정서 분석으로) 어르신 지표를 누적**하는 실시간 파이프라인입니다.
+Go 미들웨어(VAD·WebSocket·RabbitMQ)와 Spring 백엔드 뒤에서 도는 Python 워커 묶음입니다.
+
+### 아키텍처 — fast/slow 이중 트랙 + 피드백 루프
+
+```
+마이크 → WS → 미들웨어(VAD) → RabbitMQ
+  ├─ FAST  : STT → 말벗 대답(누적지표 반영) → TTS → user-reply 큐 → 미들웨어 → WS → 사용자(음성+자막)
+  └─ SLOW  : 음성감정(6-cat) + ADK 5지표 분석 → 백엔드 → PostgreSQL ──┐
+                                                                     └→ 다음 대답의 컨텍스트로 환류(피드백 루프)
+```
+
+- **FAST 트랙** `analysis_service._fast_reply`: STT 도착 즉시 `reply_llm.generate_reply`로 대답을
+  만들고(어르신 누적 지표를 시스템 프롬프트에 주입), `tts.py`로 음성 합성해 `todai.user.reply` 큐로 보냄.
+  미들웨어가 session_id로 라우팅해 WS로 사용자에게 음성+자막 전달.
+- **SLOW 트랙** `analysis_service._try_record`: 같은 발화의 감정+STT가 모이면 ADK로 5지표 분석 후
+  백엔드 내부 API에 기록. 분석 결과는 `elder_context.py`가 되읽어 다음 대답에 반영(피드백 루프).
+- 정상 동작 시 **steady-state 지연 ≈ 3~4초** (STT 0.4s + LLM ~3s + TTS 0.3s, 모델 warm 기준).
+  프로세스 첫 호출엔 모델 로딩(whisper·mms-tts)으로 수십 초 → 데모 전 1회 워밍 권장.
+
+### 구성 요소 · 포트
+
+| 서비스 | 포트 | 역할 |
+|--------|:---:|------|
+| `analysis_service.py` | — | emotion·STT 워커 + fast 대답/TTS + slow ADK 기록 (RabbitMQ 소비) |
+| `reply_service.py` | 8100 | 프론트 텍스트 채팅용 `POST /api/chat` (FastAPI) |
+| Ollama (말벗 LLM 런타임) | 11434 | `exaone3.5:7.8b` (한국어) — `ollama pull exaone3.5:7.8b` |
+| RabbitMQ | 5672 | 워커 큐 (`todai.worker.emotion/stt`, `todai.reply`, `todai.user.reply`) |
+| ADK 인증 프록시 | 8081 | 배포 Cloud Run 멀티에이전트 호출용 (아래 참조) |
+
+> 전체 스택 기동·검증 절차(미들웨어·백엔드·프론트 포함)는 저장소 루트의 **`PROJECT_TEST.md`** 참조.
+
+### 환경변수 (분석서비스)
+
+| 변수 | 기본 | 의미 |
+|------|:---:|------|
+| `USE_REAL_STT` | 0 | 1이면 학습 Whisper(GPU), 0이면 mock 텍스트 |
+| `USE_REAL_EMOTION` | 0 | 1이면 wav2vec2 감정모델(HF_TOKEN 필요), 0이면 mock |
+| `USE_REPLY_LLM` | 1 | STT 후 말벗 대답 생성(Ollama) |
+| `USE_TTS` | 1 | 대답을 음성(TTS)으로도 전달 |
+| `USE_REMOTE_ADK` | 1 | 1이면 배포 ADK 멀티에이전트 호출, 0이면 로컬 `analyze_mental_health` |
+| `ADK_LOCAL_FALLBACK` | 1 | 원격 ADK 실패 시 로컬 분석으로 폴백 |
+| `DEMO_ELDER_ID` | (자동) | 기록을 연결할 어르신 id (미설정 시 `/api/main` 첫 어르신) |
+
+### 배포 ADK 멀티에이전트 호출 (`adk_remote.py`)
+
+SLOW 트랙은 기본적으로 **배포된 Cloud Run 멀티에이전트**(`agent.py`의 다중 전문가 토론판)를 호출합니다.
+비공개 서비스라 Google ID 토큰이 필요한데, 로컬에선 **gcloud 프록시**가 가장 간단합니다:
+
+```powershell
+# 최초 1회
+gcloud auth login
+gcloud config set project gdgsc-499914
+gcloud components install cloud-run-proxy
+
+# 프록시 기동 (이 창은 떠 있어야 함 — 프록시가 인증을 주입)
+gcloud run services proxy adk-default-service-name --region asia-northeast3 --port 8081
+#  -> ai_agent/.env 의 ADK_BASE_URL=http://localhost:8081 이면 토큰 없이 호출됨
+```
+
+`adk_remote.analyze_remote()`가 세션 생성 → `/run` → 응답 이벤트에서 5지표를 추출합니다(툴의
+`functionResponse.response.scores` 또는 최종 텍스트의 `analyze_mental_health_response.scores`를 재귀 탐색).
+프록시가 꺼져 있으면 `ADK_LOCAL_FALLBACK=1`로 로컬 분석에 자동 폴백하므로 파이프라인은 멈추지 않습니다.
+운영(Spring)에서는 run.invoker 서비스계정으로 google-auth가 ID 토큰을 자동 발급합니다.
+
+### 단독 실행
+
+```powershell
+# 분석서비스 (실 STT + 말벗 + TTS + 배포 ADK)
+$env:USE_REAL_STT="1"
+.\venv\Scripts\python.exe -u pipeline\analysis_service.py
+
+# 프론트 채팅용 대답 서비스
+.\venv\Scripts\python.exe -u pipeline\reply_service.py
+
+# E2E 테스트: 발화 1건 흘려보내고 대답 수신 (reply_out.wav 저장)
+.\venv\Scripts\python.exe -u pipeline\ws_audio_client.py --wav 발화.wav
 ```
 
 ---
