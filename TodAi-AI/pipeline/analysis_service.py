@@ -22,10 +22,19 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 
 import pika
 import requests
+
+# Windows 콘솔(cp949)로 한글 대답/STT 를 print 할 때 일부 자모(ᄒ 등)에서
+# UnicodeEncodeError 로 콜백이 죽어 서비스가 크래시하던 것을 방지 — UTF-8(+replace) 강제.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
 
 sys.path.insert(0, os.path.dirname(__file__))  # pipeline/ (reply_llm)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -180,9 +189,17 @@ def _analyze(session_id: str, text: str, emotion_6: dict, history: list) -> dict
 
 
 def _try_record(corr_id: str):
+    """emotion+stt 가 모이면 SLOW 트랙 분석을 시작. ADK 호출이 ~70초 블로킹하므로
+    pika I/O 루프를 막지 않도록 별도 스레드에서 실행한다(스레드는 pika 를 건드리지 않고
+    HTTP 만 하므로 안전). 그렇지 않으면 긴 블로킹 동안 RabbitMQ 가 연결을 리셋해 죽는다."""
     st = _pending.get(corr_id)
     if not st or "emotion" not in st or "stt" not in st:
         return
+    _pending.pop(corr_id, None)  # 한 번만 처리(claim)
+    threading.Thread(target=_record_worker, args=(corr_id, st), daemon=True).start()
+
+
+def _record_worker(corr_id: str, st: dict):
     job_id = st["job_id"]
     session_id = st["session_id"]
     elder_id = _elder_for(session_id, st.get("elder_id", ""))
@@ -190,43 +207,44 @@ def _try_record(corr_id: str):
     text = st["stt"]
     src = "REMOTE-ADK" if USE_REMOTE_ADK else "LOCAL"
     print(f"[SLOW/ADK:{src}] correlation={corr_id} job_id={job_id} elder={elder_id} -> analyzing (6-cat emotion)")
-
-    history = [
-        {"role": "assistant", "text": "오늘 어떻게 지내셨어요?", "timestamp": int(time.time()) - 60},
-        {"role": "user", "text": text, "timestamp": int(time.time()) - 30},
-    ]
-    result = _analyze(session_id, text, emotion_6, history)
-    scores = result["scores"]
-    # 에이전트 키 emotional_fluctuation -> 백엔드 metric 키 emotion_variance
-    metrics = {
-        "social_isolation": scores["social_isolation"],
-        "health_anxiety": scores["health_anxiety"],
-        "daily_vitality": scores["daily_vitality"],
-        "emotion_variance": scores["emotional_fluctuation"],
-        "cognitive_load": scores["cognitive_load"],
-    }
-    overall = round(sum(metrics.values()) / len(metrics), 2)
-    resp = requests.post(
-        f"{BACKEND_BASE}/api/internal/analysis-jobs/{job_id}/result",
-        json={
-            "session_id": session_id,
-            "elder_id": elder_id,
-            "correlation_id": corr_id,
-            "job_status": "completed",
-            "analysis_status": "SUCCESS",
-            "adk_status": "SUCCESS",
-            "stt_text": text,
-            "metrics": metrics,
-            "summary_text": "음성감정(슬픔/두려움 우세)과 대화에서 건강 불안·사회적 고립 신호가 관찰됨.",
-            "overall_score": overall,
-        },
-        timeout=15,
-    )
-    if resp.ok:
-        print(f"[RECORD] saved | {resp.json()}  scores={scores} overall={overall}")
-    else:
-        print(f"[RECORD][ERROR] {resp.status_code} {resp.text}")
-    _pending.pop(corr_id, None)
+    try:
+        history = [
+            {"role": "assistant", "text": "오늘 어떻게 지내셨어요?", "timestamp": int(time.time()) - 60},
+            {"role": "user", "text": text, "timestamp": int(time.time()) - 30},
+        ]
+        result = _analyze(session_id, text, emotion_6, history)
+        scores = result["scores"]
+        # 에이전트 키 emotional_fluctuation -> 백엔드 metric 키 emotion_variance
+        metrics = {
+            "social_isolation": scores["social_isolation"],
+            "health_anxiety": scores["health_anxiety"],
+            "daily_vitality": scores["daily_vitality"],
+            "emotion_variance": scores["emotional_fluctuation"],
+            "cognitive_load": scores["cognitive_load"],
+        }
+        overall = round(sum(metrics.values()) / len(metrics), 2)
+        resp = requests.post(
+            f"{BACKEND_BASE}/api/internal/analysis-jobs/{job_id}/result",
+            json={
+                "session_id": session_id,
+                "elder_id": elder_id,
+                "correlation_id": corr_id,
+                "job_status": "completed",
+                "analysis_status": "SUCCESS",
+                "adk_status": "SUCCESS",
+                "stt_text": text,
+                "metrics": metrics,
+                "summary_text": "음성감정(슬픔/두려움 우세)과 대화에서 건강 불안·사회적 고립 신호가 관찰됨.",
+                "overall_score": overall,
+            },
+            timeout=120,
+        )
+        if resp.ok:
+            print(f"[RECORD] saved | {resp.json()}  scores={scores} overall={overall}")
+        else:
+            print(f"[RECORD][ERROR] {resp.status_code} {resp.text}")
+    except Exception as exc:  # noqa: BLE001  스레드 예외가 조용히 사라지지 않게
+        print(f"[RECORD][ERROR] worker failed: {exc}")
 
 
 def _on_emotion(ch, method, _props, body):

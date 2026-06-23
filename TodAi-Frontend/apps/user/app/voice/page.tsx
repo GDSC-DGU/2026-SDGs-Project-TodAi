@@ -37,6 +37,9 @@ export default function VoicePage() {
   const srcRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const sinkRef = useRef<GainNode | null>(null);
   const playCtxRef = useRef<AudioContext | null>(null);
+  const speakingRef = useRef(false); // 토닥이 대답 재생 중 — 마이크 전송 차단(피드백 루프 방지)
+  const curSrcRef = useRef<AudioBufferSourceNode | null>(null); // 현재 재생 소스(겹침 방지용)
+  const [speaking, setSpeaking] = useState(false);
 
   // 대답 오디오(PCM16 base64) 재생
   const playReply = useCallback((b64: string, sr: number) => {
@@ -51,9 +54,30 @@ export default function VoicePage() {
       const ctx = playCtxRef.current;
       const buf = ctx.createBuffer(1, f32.length, sr || TARGET_SR);
       buf.getChannelData(0).set(f32);
+      // 이전 대답이 아직 재생 중이면 끊는다 (겹쳐 들리는 것 방지)
+      try {
+        curSrcRef.current?.stop();
+      } catch {
+        /* already stopped */
+      }
       const src = ctx.createBufferSource();
       src.buffer = buf;
       src.connect(ctx.destination);
+      curSrcRef.current = src;
+      // 재생 동안 마이크 전송 차단(반이중) — 스피커 소리를 마이크가 되받아 재STT되는 루프 방지
+      speakingRef.current = true;
+      setSpeaking(true);
+      src.onended = () => {
+        if (curSrcRef.current !== src) return; // 더 새 대답이 시작됐으면 무시
+        curSrcRef.current = null;
+        // 스피커 잔향이 마이크에 잡히지 않게 약간 지연 후 마이크 재개
+        setTimeout(() => {
+          if (curSrcRef.current === null) {
+            speakingRef.current = false;
+            setSpeaking(false);
+          }
+        }, 350);
+      };
       src.start();
     } catch (e) {
       console.error("reply audio play failed", e);
@@ -124,9 +148,10 @@ export default function VoicePage() {
             // 브라우저가 실제로 듣는 음량(rms) — 화면 진단용
             let sum = 0;
             for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
-            setMicLevel(Math.sqrt(sum / input.length));
+            setMicLevel(speakingRef.current ? 0 : Math.sqrt(sum / input.length));
             const ws = wsRef.current;
             if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            if (speakingRef.current) return; // 토닥이 말하는 동안엔 마이크 전송 차단(반이중)
             ws.send(toPcm16(input, ctx.sampleRate));
           };
           src.connect(proc);
@@ -189,7 +214,7 @@ export default function VoicePage() {
           <p className="text-[1.15rem] font-bold leading-tight">토닥이</p>
           <p className="text-[0.85rem] text-[var(--success)] flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-[var(--success)]" />
-            {status}
+            {speaking ? "토닥이가 말하고 있어요…" : status}
           </p>
         </div>
         <Link
