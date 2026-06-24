@@ -332,7 +332,7 @@ function mapDailyApi(api: DailyApiData, date: string): DailyApiResult {
       totalMessageCount,
       hiddenMessageCount,
     },
-    chatLog: chatLog.slice(0, PREVIEW_LIMIT),
+    chatLog, // 전체 전달 — '전체보기'에서 펼치도록(미리보기 슬라이스는 컴포넌트에서)
     conversationTimeRange,
     conversationTimeStart: api.timeline?.start_time
       ? trimSeconds(api.timeline.start_time)
@@ -618,7 +618,9 @@ function DailyView({
   error: string | null;
 }) {
   const d = daily;
-  const visibleChat = chatLog;
+  const CHAT_PREVIEW_LIMIT = 4;
+  const [chatExpanded, setChatExpanded] = useState(false);
+  const visibleChat = chatExpanded ? chatLog : chatLog.slice(0, CHAT_PREVIEW_LIMIT);
   const statusColor =
     d.statusTone === "good"
       ? "text-blue-500"
@@ -724,8 +726,12 @@ function DailyView({
         </div>
 
         {d.hiddenMessageCount > 0 && (
-          <button className="w-full mt-5 py-3 text-sm font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 rounded-xl flex items-center justify-center gap-1.5">
-            전체보기 ({d.hiddenMessageCount}개) <span className="text-xs">▼</span>
+          <button
+            onClick={() => setChatExpanded((v) => !v)}
+            className="w-full mt-5 py-3 text-sm font-medium text-gray-600 bg-gray-50 hover:bg-gray-100 rounded-xl flex items-center justify-center gap-1.5"
+          >
+            {chatExpanded ? "접기" : `전체보기 (${d.hiddenMessageCount}개)`}{" "}
+            <span className="text-xs">{chatExpanded ? "▲" : "▼"}</span>
           </button>
         )}
       </div>

@@ -3,6 +3,8 @@ package vad
 import (
 	"encoding/binary"
 	"math"
+	"os"
+	"strconv"
 )
 
 const (
@@ -10,6 +12,29 @@ const (
 	DefaultSilenceDurationMs = 1500
 	DefaultRMSThreshold      = 100
 )
+
+// envFloat / envInt 로 마이크에 맞춰 VAD 를 보정할 수 있다(재컴파일 필요).
+// 발화가 단편('몸')으로 잘리면 미들웨어 로그의 `VAD rms=` 값을 보고
+//   VAD_RMS_THRESHOLD (말할 때 rms 보다 약간 낮게, 무음 rms 보다 높게)
+//   VAD_SILENCE_MS    (문장 사이 호흡을 끊지 않게 늘림, 기본 1500)
+// 을 조정한다.
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
+}
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
 
 // Detector is a minimal PCM 16-bit mono VAD for wiring the utterance boundary.
 // It is intentionally simple and can be replaced without changing queue code.
@@ -24,8 +49,8 @@ type Detector struct {
 func NewDetector() *Detector {
 	return &Detector{
 		sampleRateHz:    DefaultSampleRateHz,
-		silenceTargetMs: DefaultSilenceDurationMs,
-		rmsThreshold:    DefaultRMSThreshold,
+		silenceTargetMs: envInt("VAD_SILENCE_MS", DefaultSilenceDurationMs),
+		rmsThreshold:    envFloat("VAD_RMS_THRESHOLD", DefaultRMSThreshold),
 	}
 }
 

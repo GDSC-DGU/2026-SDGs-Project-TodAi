@@ -200,6 +200,63 @@ def _try_record(corr_id: str):
     threading.Thread(target=_record_worker, args=(corr_id, st), daemon=True).start()
 
 
+_METRIC_KO = {
+    "social_isolation": "사회적 고립",
+    "cognitive_load": "인지 부하",
+    "emotional_fluctuation": "감정 변동",
+    "daily_vitality": "일상 활력",
+    "health_anxiety": "건강 불안",
+}
+_HANGUL_RE = re.compile(r"[가-힣]")
+
+
+def _meaningful_stt(text: str) -> bool:
+    """STT 결과가 5지표 분석에 쓸 만한지 검사한다. 너무 짧은 단편('몸')이나
+    같은 토큰 반복('어 어 어', '아 아')이면 LLM 이 내용 없는 입력에 엉뚱한 점수
+    (예: health_anxiety 95)를 매기므로 분석 대상에서 제외한다."""
+    t = (text or "").strip()
+    if len(_HANGUL_RE.findall(t)) < 4:          # 한글 음절 4개 미만 → 문장으로 보기 어려움
+        return False
+    distinct = {tok for tok in t.split() if _HANGUL_RE.search(tok)}
+    if len(distinct) <= 2 and all(len(tok) <= 2 for tok in distinct):  # '어 어 어' 류
+        return False
+    return True
+
+
+def _augment_emotion(emotion_6: dict) -> dict:
+    """음성 감정 페이로드에 분석 지침을 덧붙인다. 감정모델이 노이즈로 오분류
+    (예: 스트레스 음성→'기쁨')하면 점수가 부풀려지므로, 분석기(원격 ADK/로컬 공통)가
+    '발화 내용'을 1순위로 보고 AI 답변을 채점 근거로 쓰지 않도록 유도한다.
+    원격 재배포 없이 입력 단에서 교정하는 방식 — build_data_prompt 가 이 JSON 을
+    그대로 프롬프트에 넣으므로 원격·로컬 모두에 반영된다."""
+    aug = {k: round(float(v), 4) for k, v in (emotion_6 or {}).items()}
+    top = max(aug.values(), default=0.0)
+    aug["_분석지침"] = (
+        "위 음성감정은 부정확할 수 있는 보조 신호입니다. 어르신(화자)의 발화 '내용'을 "
+        "1순위 근거로 점수를 산정하고, 감정 추정과 발화 내용이 상충하면 내용을 우선하세요. "
+        "말벗 AI(assistant)의 위로·답변 문장은 어르신 상태의 채점 근거가 아닙니다."
+    )
+    if 0.0 < top < 0.5:
+        aug["_감정신뢰도"] = f"낮음(top={top:.2f}, 감정 신호 약함 → 내용 위주로 판단)"
+    return aug
+
+
+def _build_summary(scores: dict, emotion_6: dict) -> str:
+    """실제 점수에 근거한 요약. 점수가 낮을수록 나쁨(높을수록 건강)이므로 70 미만인
+    지표만 '신호 관찰'로 묶는다. 하드코딩 요약이 점수와 모순되던 문제를 해결."""
+    concerns = [
+        _METRIC_KO[k]
+        for k in ("social_isolation", "cognitive_load", "emotional_fluctuation",
+                  "daily_vitality", "health_anxiety")
+        if isinstance(scores.get(k), (int, float)) and scores[k] < 70
+    ]
+    top = sorted((emotion_6 or {}).items(), key=lambda kv: kv[1], reverse=True)[:2]
+    emo = "/".join(k for k, _ in top) if top else "중립"
+    if concerns:
+        return f"음성감정({emo} 우세)과 대화에서 {'·'.join(concerns)} 신호가 관찰됨."
+    return f"음성감정({emo} 우세). 두드러진 위험 신호는 관찰되지 않음."
+
+
 def _record_worker(corr_id: str, st: dict):
     job_id = st["job_id"]
     session_id = st["session_id"]
@@ -208,12 +265,17 @@ def _record_worker(corr_id: str, st: dict):
     text = st["stt"]
     src = "REMOTE-ADK" if USE_REMOTE_ADK else "LOCAL"
     print(f"[SLOW/ADK:{src}] correlation={corr_id} job_id={job_id} elder={elder_id} -> analyzing (6-cat emotion)")
+    if not _meaningful_stt(text):
+        # 단편/잡음 STT 를 분석하면 의미 없는 점수가 대시보드에 저장된다 → 생략.
+        print(f"[SLOW/SKIP] STT 텍스트가 분석에 부족함(단편/잡음): {text!r} -> 5지표 분석 생략(점수 미저장)")
+        return
     try:
         history = [
             {"role": "assistant", "text": "오늘 어떻게 지내셨어요?", "timestamp": int(time.time()) - 60},
             {"role": "user", "text": text, "timestamp": int(time.time()) - 30},
         ]
-        result = _analyze(session_id, text, emotion_6, history)
+        # 음성감정엔 분석 지침을 덧붙여 보낸다(내용 우선·AI 답변 제외). 요약/표시는 원본 emotion_6 사용.
+        result = _analyze(session_id, text, _augment_emotion(emotion_6), history)
         scores = result["scores"]
         # 에이전트 키 emotional_fluctuation -> 백엔드 metric 키 emotion_variance
         metrics = {
@@ -235,7 +297,7 @@ def _record_worker(corr_id: str, st: dict):
                 "adk_status": "SUCCESS",
                 "stt_text": text,
                 "metrics": metrics,
-                "summary_text": "음성감정(슬픔/두려움 우세)과 대화에서 건강 불안·사회적 고립 신호가 관찰됨.",
+                "summary_text": _build_summary(scores, emotion_6),
                 "overall_score": overall,
             },
             timeout=120,
