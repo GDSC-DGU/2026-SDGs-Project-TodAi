@@ -233,33 +233,11 @@ TodAi/
 
 # 8. Organization (조직 구성도)
 
-<!-- <p align="center">
-  <img src="docs/images/architecture.png" width="700"/>
-</p> -->
-
 ### 🔄 데이터 흐름 (실시간 음성 케어 파이프라인)
 
-```
-                                          ┌──────────── Fast Track (즉시 응답) ───────────┐
-                                          │                                              ▼
- 🧓 어르신                                  │                                      🔊 말벗 음성 답변
-   │ 음성                                   │                                              │
-   ▼                                       │   STT → 말벗 LLM → TTS                        │
-┌─────────────┐  WS/PCM   ┌──────────────┐ │  ┌──────────────────────┐                    │
-│  Frontend   │──────────▶│  Middleware  │─┼─▶│        AI (Python)     │────────────────────┘
-│  (노인 음성앱) │          │   (Go·VAD)    │ │  │  STT·감정·5지표·말벗·TTS  │
-└─────────────┘           └──────────────┘ │  └──────────┬───────────┘
-       ▲                       RabbitMQ     │             │ Slow Track (5지표 정신건강 분석)
-       │                                    └─────────────┘             │
-       │ 대시보드 조회                                                    ▼
-┌─────────────┐           ┌──────────────┐                    ┌──────────────────┐
-│  Frontend   │◀──────────│   Backend     │◀───────────────────│  분석결과 저장 API  │
-│ (복지사 대시보드)│   조회 API │ (Spring·DB)    │      결과 기록       └──────────────────┘
-└─────────────┘           └──────────────┘
-       ▲
-       │
-   👩‍💼 복지사 (위기 조기 발견 · 방문 우선순위)
-```
+<p align="center">
+  <img src="image.png" width="800" alt="토닥이 시스템 아키텍처 / 데이터 흐름"/>
+</p>
 
 - **Frontend** (Next.js): 노인용 음성 대화 앱 + 복지사 관리 대시보드
 - **Middleware** (Go): 실시간 음성 스트림 수신·VAD 발화 분할, Fast/Slow 트랙 오케스트레이션
@@ -286,11 +264,7 @@ PostgreSQL 15+ · RabbitMQ 3.x   # 데이터 / 메시지 큐
 ### 1. 레포지토리 클론
 
 ```bash
-git clone https://github.com/<your-org>/TodAi-Frontend.git
-git clone https://github.com/<your-org>/TodAi-Backend.git
-git clone https://github.com/<your-org>/TodAi-MiddleWare.git
-git clone https://github.com/<your-org>/TodAi-AI.git
-```
+git clone https://github.com/GDSC-DGU/2026-SDGs-Project-TodAi
 
 ### 2. 서비스별 실행
 
